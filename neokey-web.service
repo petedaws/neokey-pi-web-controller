@@ -1,0 +1,17 @@
+[Unit]
+Description=NeoKey Trinkey LAN light controller
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/neokey-control
+ExecStart=%h/neokey-control/venv/bin/python %h/neokey-control/app.py
+Environment=PYTHONUNBUFFERED=1
+Environment=NEOKEY_BIND=0.0.0.0
+Environment=NEOKEY_WEB_PORT=8888
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

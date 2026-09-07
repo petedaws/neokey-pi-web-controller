@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+*.uf2
+state.json
+venv/
+.venv/

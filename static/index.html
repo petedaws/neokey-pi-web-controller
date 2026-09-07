@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#10131a">
+  <title>NeoKey Light</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px;
+      color: #f4f6fb; background: radial-gradient(circle at 20% 0%, #26334d 0, #121620 38%, #090b10 100%);
+    }
+    main {
+      width: min(920px, 100%); display: grid; grid-template-columns: minmax(280px, 1fr) minmax(260px, .9fr);
+      gap: 30px; padding: clamp(22px, 4vw, 42px); border: 1px solid #ffffff18; border-radius: 28px;
+      background: #171b24dd; box-shadow: 0 24px 80px #0008; backdrop-filter: blur(18px);
+    }
+    h1 { margin: 0 0 5px; font-size: clamp(1.6rem, 3vw, 2.35rem); letter-spacing: -.04em; }
+    .sub { margin: 0 0 24px; color: #a7afbf; }
+    .wheel-wrap { position: relative; width: min(100%, 390px); aspect-ratio: 1; margin: auto; touch-action: none; }
+    canvas { width: 100%; height: 100%; display: block; border-radius: 50%; cursor: crosshair; filter: drop-shadow(0 16px 25px #0008); }
+    #marker { position: absolute; width: 22px; height: 22px; border: 3px solid white; border-radius: 50%; box-shadow: 0 1px 8px #000b; pointer-events: none; transform: translate(-50%, -50%); }
+    .controls { display: flex; flex-direction: column; justify-content: center; gap: 24px; }
+    .preview { height: 78px; border-radius: 18px; border: 1px solid #ffffff20; box-shadow: inset 0 0 26px #fff2, 0 10px 25px #0004; }
+    .row-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+    label { font-weight: 650; }
+    output { color: #c8ceda; font-variant-numeric: tabular-nums; }
+    input[type="range"] { width: 100%; accent-color: #f5f7ff; }
+    .toggle-row { display: flex; justify-content: space-between; align-items: center; padding: 5px 0; }
+    .switch { position: relative; width: 54px; height: 30px; }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .track { position: absolute; inset: 0; background: #3a4050; border-radius: 99px; cursor: pointer; transition: .2s; }
+    .track::before { content: ""; position: absolute; width: 22px; height: 22px; left: 4px; top: 4px; border-radius: 50%; background: white; transition: .2s; }
+    .switch input:checked + .track { background: #7c5cff; }
+    .switch input:checked + .track::before { transform: translateX(24px); }
+    .rate.disabled { opacity: .4; }
+    .status { display: flex; align-items: center; gap: 8px; color: #a7afbf; font-size: .9rem; }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: #ef5350; box-shadow: 0 0 10px currentColor; }
+    .dot.online { background: #4ed690; }
+    .hint { margin: 0; color: #7f8797; font-size: .82rem; line-height: 1.45; }
+    @media (max-width: 710px) { main { grid-template-columns: 1fr; } .wheel-wrap { max-width: 350px; } }
+  </style>
+</head>
+<body>
+  <main>
+    <section>
+      <h1>NeoKey Light</h1>
+      <p class="sub">Pick a color from the wheel.</p>
+      <div class="wheel-wrap" id="wheelWrap">
+        <canvas id="wheel" aria-label="Color wheel"></canvas>
+        <span id="marker"></span>
+      </div>
+    </section>
+    <section class="controls">
+      <div class="preview" id="preview"></div>
+      <div>
+        <div class="row-head"><label for="brightness">Brightness</label><output id="brightnessOut">25%</output></div>
+        <input id="brightness" type="range" min="0" max="100" step="1" value="25">
+      </div>
+      <div class="toggle-row">
+        <label for="flash">Flash</label>
+        <label class="switch" for="flash"><input id="flash" type="checkbox"><span class="track"></span></label>
+      </div>
+      <div class="rate disabled" id="rateGroup">
+        <div class="row-head"><label for="flashRate">Flash rate</label><output id="flashRateOut">2.00 Hz</output></div>
+        <input id="flashRate" type="range" min="0.25" max="10" step="0.25" value="2">
+      </div>
+      <div class="status"><span class="dot" id="dot"></span><span id="status">Connecting…</span></div>
+      <p class="hint">Changes are saved on the Pi and restored when the controller reconnects.</p>
+    </section>
+  </main>
+  <script>
+    const wheel = document.querySelector('#wheel');
+    const wrap = document.querySelector('#wheelWrap');
+    const marker = document.querySelector('#marker');
+    const preview = document.querySelector('#preview');
+    const brightness = document.querySelector('#brightness');
+    const brightnessOut = document.querySelector('#brightnessOut');
+    const flash = document.querySelector('#flash');
+    const flashRate = document.querySelector('#flashRate');
+    const flashRateOut = document.querySelector('#flashRateOut');
+    const rateGroup = document.querySelector('#rateGroup');
+    const dot = document.querySelector('#dot');
+    const statusText = document.querySelector('#status');
+    let state = {r:255, g:255, b:255, brightness:25, flash:false, flashRate:2};
+    let hue = 0, saturation = 0, socket, reconnectTimer, fallbackInFlight = false, liveSocket = false;
+    let lastConnection = {connected:false};
+    let pendingPatch = {};
+
+    function hsvToRgb(h, s, v) {
+      const c = v * s, x = c * (1 - Math.abs((h / 60) % 2 - 1)), m = v - c;
+      let p = [0, 0, 0];
+      if (h < 60) p = [c,x,0]; else if (h < 120) p = [x,c,0]; else if (h < 180) p = [0,c,x];
+      else if (h < 240) p = [0,x,c]; else if (h < 300) p = [x,0,c]; else p = [c,0,x];
+      return p.map(n => Math.round((n + m) * 255));
+    }
+    function rgbToHsv(r, g, b) {
+      r/=255; g/=255; b/=255; const max=Math.max(r,g,b), min=Math.min(r,g,b), d=max-min;
+      let h=0; if (d) { if (max===r) h=60*(((g-b)/d)%6); else if(max===g) h=60*((b-r)/d+2); else h=60*((r-g)/d+4); }
+      if (h<0) h+=360; return [h, max ? d/max : 0, max];
+    }
+    function drawWheel() {
+      const size = Math.max(260, Math.floor(wrap.clientWidth * devicePixelRatio));
+      wheel.width = wheel.height = size;
+      const ctx = wheel.getContext('2d'), img = ctx.createImageData(size,size), radius=size/2;
+      for (let y=0; y<size; y++) for (let x=0; x<size; x++) {
+        const dx=x-radius, dy=y-radius, s=Math.sqrt(dx*dx+dy*dy)/radius, i=(y*size+x)*4;
+        if (s<=1) { let h=Math.atan2(dy,dx)*180/Math.PI; if(h<0)h+=360; const rgb=hsvToRgb(h,s,1); img.data[i]=rgb[0]; img.data[i+1]=rgb[1]; img.data[i+2]=rgb[2]; img.data[i+3]=255; }
+      }
+      ctx.putImageData(img,0,0); positionMarker();
+    }
+    function positionMarker() {
+      const r=wrap.clientWidth/2, angle=hue*Math.PI/180;
+      marker.style.left=`${r + Math.cos(angle)*saturation*r}px`;
+      marker.style.top=`${r + Math.sin(angle)*saturation*r}px`;
+    }
+    function chooseColor(event) {
+      const rect=wrap.getBoundingClientRect(), r=rect.width/2, dx=event.clientX-rect.left-r, dy=event.clientY-rect.top-r;
+      saturation=Math.min(1,Math.sqrt(dx*dx+dy*dy)/r); hue=Math.atan2(dy,dx)*180/Math.PI; if(hue<0)hue+=360;
+      [state.r,state.g,state.b]=hsvToRgb(hue,saturation,1); render(); queueSave({r:state.r,g:state.g,b:state.b});
+    }
+    function render() {
+      brightness.value=state.brightness; brightnessOut.value=`${state.brightness}%`;
+      flash.checked=state.flash; flashRate.value=state.flashRate; flashRateOut.value=`${Number(state.flashRate).toFixed(2)} Hz`;
+      rateGroup.classList.toggle('disabled',!state.flash); flashRate.disabled=!state.flash;
+      const factor=state.brightness/100;
+      preview.style.background=`rgb(${Math.round(state.r*factor)},${Math.round(state.g*factor)},${Math.round(state.b*factor)})`;
+      preview.style.boxShadow=`inset 0 0 26px #fff2, 0 10px 38px rgba(${state.r},${state.g},${state.b},.25)`;
+      positionMarker();
+    }
+    function setConnection(info) {
+      lastConnection=info;
+      dot.classList.toggle('online',!!info.connected);
+      const count=Number(info.deviceCount||0), noun=count===1?'NeoKey':'NeoKeys';
+      statusText.textContent=info.connected ? `${count||1} ${noun} connected${liveSocket?' · live 10 Hz':''}` : 'NeoKey offline — waiting to reconnect';
+    }
+    function queueSave(patch) { Object.assign(pendingPatch,patch); }
+    function applyServer(info) {
+      state={r:info.r,g:info.g,b:info.b,brightness:info.brightness,flash:info.flash,flashRate:info.flashRate,...pendingPatch};
+      [hue,saturation]=rgbToHsv(state.r,state.g,state.b); setConnection(info); render();
+    }
+    async function flush() {
+      if (!Object.keys(pendingPatch).length) return;
+      const patch=pendingPatch; pendingPatch={};
+      if (socket && socket.readyState===WebSocket.OPEN) {
+        try { socket.send(JSON.stringify({type:'set',patch})); return; }
+        catch(e) { Object.assign(pendingPatch,patch); }
+      }
+      if (fallbackInFlight) { Object.assign(pendingPatch,patch); return; }
+      fallbackInFlight=true;
+      try {
+        const response=await fetch('/api/state',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(patch)});
+        if(!response.ok)throw Error(await response.text()); applyServer(await response.json());
+      } catch(e) { Object.assign(pendingPatch,patch); dot.classList.remove('online'); statusText.textContent='Controller unavailable'; }
+      finally { fallbackInFlight=false; }
+    }
+    function connectSocket() {
+      clearTimeout(reconnectTimer);
+      const scheme=location.protocol==='https:'?'wss':'ws';
+      socket=new WebSocket(`${scheme}://${location.host}/ws`);
+      socket.onopen=()=>{ liveSocket=true; setConnection(lastConnection); };
+      socket.onmessage=event=>{ const message=JSON.parse(event.data); if(message.type==='state')applyServer(message.state); };
+      socket.onclose=()=>{ liveSocket=false; statusText.textContent='Reconnecting…'; reconnectTimer=setTimeout(connectSocket,1000); };
+      socket.onerror=()=>socket.close();
+    }
+    brightness.addEventListener('input',()=>{state.brightness=Number(brightness.value);render();queueSave({brightness:state.brightness});});
+    flash.addEventListener('change',()=>{state.flash=flash.checked;render();queueSave({flash:state.flash});});
+    flashRate.addEventListener('input',()=>{state.flashRate=Number(flashRate.value);render();queueSave({flashRate:state.flashRate});});
+    wrap.addEventListener('pointerdown',e=>{wrap.setPointerCapture(e.pointerId);chooseColor(e);});
+    wrap.addEventListener('pointermove',e=>{if(e.buttons)chooseColor(e);});
+    window.addEventListener('resize',()=>requestAnimationFrame(drawWheel));
+    async function init() {
+      drawWheel();
+      try { applyServer(await (await fetch('/api/state')).json()); }
+      catch(e) { setConnection({connected:false}); }
+      connectSocket();
+    }
+    init(); setInterval(flush,100);
+  </script>
+</body>
+</html>
